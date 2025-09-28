@@ -66,9 +66,16 @@ func NewDataPart(data map[string]any) Part {
 }
 
 // NewStreamingStatusMessage creates a status message for streaming
-func NewStreamingStatusMessage(messageID, status string, metadata map[string]any) *Message {
+func NewStreamingStatusMessage(messageID string, state TaskState, metadata map[string]any) *Message {
+	timestamp := time.Now().Format(time.RFC3339)
+
 	data := map[string]any{
-		"status": status,
+		"status": TaskStatus{
+			State: state,
+			// An ISO 8601 datetime string indicating when this status was recorded.
+			Timestamp: &timestamp,
+			// Message: ,
+		},
 	}
 	for k, v := range metadata {
 		data[k] = v

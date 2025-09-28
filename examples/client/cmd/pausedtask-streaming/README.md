@@ -96,7 +96,7 @@ The example processes different types of streaming events:
 
 ### Pause Detection
 
-Tasks pause when they reach `input-required` state:
+Tasks pause when they reach `input-required` (types.TaskStateInputRequired) state:
 
 ```go
 case "input-required":

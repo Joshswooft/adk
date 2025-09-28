@@ -41,11 +41,14 @@ type OpenAICompatibleAgent interface {
 // OpenAICompatibleAgentImpl is the implementation of OpenAICompatibleAgent
 // This implementation is stateless and does not maintain conversation history
 type OpenAICompatibleAgentImpl struct {
-	logger    *zap.Logger
-	llmClient LLMClient
-	toolBox   ToolBox
-	converter utils.MessageConverter
-	config    *config.AgentConfig
+	logger           *zap.Logger
+	llmClient        LLMClient
+	toolBox          ToolBox
+	converter        utils.MessageConverter
+	config           *config.AgentConfig
+	callbackExecutor CallbackExecutor
+	// TODO: implement a default channel event publisher and include options for configuring own
+	eventPublisher EventPublisher
 }
 
 // NewOpenAICompatibleAgent creates a new OpenAICompatibleAgentImpl
@@ -99,10 +102,39 @@ func (a *OpenAICompatibleAgentImpl) SetToolBox(toolBox ToolBox) {
 	a.toolBox = toolBox
 }
 
+// SetCallbackExecutor sets the callback executor for the agent
+func (a *OpenAICompatibleAgentImpl) SetCallbackExecutor(executor CallbackExecutor) {
+	a.callbackExecutor = executor
+}
+
+// GetCallbackExecutor returns the callback executor for the agent if available or a provided default
+func (a *OpenAICompatibleAgentImpl) GetCallbackExecutor() CallbackExecutor {
+	if a.callbackExecutor == nil {
+		return NewCallbackExecutor(nil, a.logger)
+	}
+	return a.callbackExecutor
+}
+
 // Run processes a conversation and returns the assistant's response along with additional messages
+// TODO: add more tests which use the callbacks
 func (a *OpenAICompatibleAgentImpl) Run(ctx context.Context, messages []types.Message) (*AgentResponse, error) {
 	if a.llmClient == nil {
 		return nil, fmt.Errorf("no LLM client configured for agent")
+	}
+
+	callbackContext := &CallbackContext{
+		AgentName:    a.config.Model, // TODO: somehow we need to get the agent name
+		InvocationID: fmt.Sprintf("invocation-%d", time.Now().UnixNano()),
+		Logger:       a.logger,
+	}
+
+	skipResult := a.GetCallbackExecutor().ExecuteBeforeAgent(ctx, callbackContext)
+	if skipResult != nil {
+		// Callback returned a message, skip agent execution
+		return &AgentResponse{
+			Response:           skipResult,
+			AdditionalMessages: []types.Message{},
+		}, nil
 	}
 
 	conversation, err := a.converter.ConvertToSDK(messages)
@@ -130,17 +162,79 @@ func (a *OpenAICompatibleAgentImpl) Run(ctx context.Context, messages []types.Me
 
 	var additionalMessages []types.Message
 
+	callbackContext = &CallbackContext{
+		AgentName:    "agent", // TODO: Get actual agent name from context
+		InvocationID: fmt.Sprintf("invocation-%d", time.Now().UnixNano()),
+		Logger:       a.logger,
+		// TODO: fill out other fields
+	}
+
 	for iteration := 0; iteration < maxIterations; iteration++ {
-		response, err := a.llmClient.CreateChatCompletion(ctx, conversation, tools...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create chat completion: %w", err)
+		// Execute BeforeModel callback if configured
+		var llmResponse *LLMResponse
+		// Convert conversation to LLM request format for callback
+		a2aMessages := make([]types.Message, len(conversation))
+		for i, msg := range conversation {
+			a2aMsg, err := a.converter.ConvertFromSDK(msg)
+			if err != nil {
+				a.logger.Warn("failed to convert SDK message for callback", zap.Error(err))
+				continue
+			}
+			a2aMessages[i] = *a2aMsg
 		}
 
-		if len(response.Choices) == 0 {
-			return nil, fmt.Errorf("no choices returned from LLM")
+		llmRequest := &LLMRequest{
+			Contents: a2aMessages,
+			Config:   &LLMConfig{
+				// TODO: Add system instruction from config
+			},
 		}
 
-		assistantMessage := response.Choices[0].Message
+		llmResponse = a.GetCallbackExecutor().ExecuteBeforeModel(ctx, callbackContext, llmRequest)
+
+		var assistantMessage sdk.Message
+		if llmResponse != nil {
+			// Callback returned a response, use it instead of calling LLM
+			sdkMsg, err := a.converter.ConvertToSDK([]types.Message{*llmResponse.Content})
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert callback response to SDK format: %w", err)
+			}
+			if len(sdkMsg) > 0 {
+				assistantMessage = sdkMsg[0]
+			}
+		} else {
+			// Normal LLM call
+			response, err := a.llmClient.CreateChatCompletion(ctx, conversation, tools...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create chat completion: %w", err)
+			}
+
+			if len(response.Choices) == 0 {
+				return nil, fmt.Errorf("no choices returned from LLM")
+			}
+
+			assistantMessage = response.Choices[0].Message
+
+			// Execute AfterModel callback if configured
+			// Convert to LLMResponse for callback
+			a2aMsg, err := a.converter.ConvertFromSDK(assistantMessage)
+			if err != nil {
+				a.logger.Warn("failed to convert assistant message for callback", zap.Error(err))
+			} else {
+				originalResponse := &LLMResponse{
+					Content: a2aMsg,
+				}
+
+				modifiedResponse := a.GetCallbackExecutor().ExecuteAfterModel(ctx, callbackContext, originalResponse)
+				if modifiedResponse != nil {
+					// Use modified response
+					sdkMsg, err := a.converter.ConvertToSDK([]types.Message{*modifiedResponse.Content})
+					if err == nil && len(sdkMsg) > 0 {
+						assistantMessage = sdkMsg[0]
+					}
+				}
+			}
+		}
 
 		conversation = append(conversation, assistantMessage)
 
@@ -150,10 +244,18 @@ func (a *OpenAICompatibleAgentImpl) Run(ctx context.Context, messages []types.Me
 		}
 
 		if assistantMessage.ToolCalls == nil || len(*assistantMessage.ToolCalls) == 0 || a.toolBox == nil {
-			return &AgentResponse{
+			finalResult := &AgentResponse{
 				Response:           assistantA2A,
 				AdditionalMessages: additionalMessages,
-			}, nil
+			}
+
+			// Execute AfterAgent callback if configured
+			modifiedResponse := a.GetCallbackExecutor().ExecuteAfterAgent(ctx, callbackContext, finalResult.Response)
+			if modifiedResponse != nil {
+				finalResult.Response = modifiedResponse
+			}
+
+			return finalResult, nil
 		}
 
 		additionalMessages = append(additionalMessages, *assistantA2A)
@@ -205,10 +307,70 @@ func (a *OpenAICompatibleAgentImpl) Run(ctx context.Context, messages []types.Me
 				}, nil
 			}
 
-			result, toolErr = a.toolBox.ExecuteTool(ctx, toolCall.Function.Name, args)
-			if toolErr != nil {
-				a.logger.Error("failed to execute tool", zap.String("tool", toolCall.Function.Name), zap.Error(toolErr))
+			// Execute BeforeTool callback if configured
+			var toolResult map[string]interface{}
+
+			toolContext := &ToolContext{
+				AgentName:    callbackContext.AgentName,
+				InvocationID: callbackContext.InvocationID,
+				Logger:       callbackContext.Logger,
+			}
+
+			tool, found := a.toolBox.GetTool(toolCall.Function.Name)
+			if !found {
+				a.logger.Error("failed to find tool", zap.String("tool", toolCall.Function.Name), zap.Error(toolErr))
+				// FIXME: fix linting issue
 				result = fmt.Sprintf("Tool execution failed: %s", toolErr.Error())
+			}
+
+			toolResult = a.GetCallbackExecutor().ExecuteBeforeTool(ctx, tool, args, toolContext)
+
+			if toolResult != nil {
+				// Callback returned a result, use it instead of executing tool
+				resultBytes, err := json.Marshal(toolResult)
+				if err != nil {
+					result = fmt.Sprintf("Error marshaling callback result: %s", err.Error())
+				} else {
+					result = string(resultBytes)
+				}
+			} else {
+				// Normal tool execution
+				result, toolErr = a.toolBox.ExecuteTool(ctx, toolCall.Function.Name, args)
+				if toolErr != nil {
+					a.logger.Error("failed to execute tool", zap.String("tool", toolCall.Function.Name), zap.Error(toolErr))
+					result = fmt.Sprintf("Tool execution failed: %s", toolErr.Error())
+				}
+
+				// Execute AfterTool callback if configured
+
+				toolContext := &ToolContext{
+					AgentName:    callbackContext.AgentName,
+					InvocationID: callbackContext.InvocationID,
+					Logger:       callbackContext.Logger,
+				}
+
+				// Convert result to map for callback
+				originalResult := map[string]interface{}{"result": result}
+				if toolErr != nil {
+					originalResult["error"] = toolErr.Error()
+				}
+
+				tool, found := a.toolBox.GetTool(toolCall.Function.Name)
+				if !found {
+					a.logger.Error("failed to find tool", zap.String("tool", toolCall.Function.Name), zap.Error(toolErr))
+					result = fmt.Sprintf("Tool execution failed: %s", toolErr.Error())
+				}
+
+				modifiedResult := a.GetCallbackExecutor().ExecuteAfterTool(ctx, tool, args, toolContext, originalResult)
+				if modifiedResult != nil {
+					// Use modified result
+					resultBytes, err := json.Marshal(modifiedResult)
+					if err != nil {
+						result = fmt.Sprintf("Error marshaling modified result: %s", err.Error())
+					} else {
+						result = string(resultBytes)
+					}
+				}
 			}
 
 			toolMessage := sdk.Message{
@@ -238,5 +400,26 @@ func (a *OpenAICompatibleAgentImpl) Run(ctx context.Context, messages []types.Me
 		}
 	}
 
-	return nil, fmt.Errorf("maximum iterations (%d) reached without final response", maxIterations)
+	finalResult := &AgentResponse{
+		Response: &types.Message{
+			Kind:      "message",
+			MessageID: fmt.Sprintf("error-%d", time.Now().UnixNano()),
+			Role:      "assistant",
+			Parts: []types.Part{
+				map[string]any{
+					"kind": "text",
+					"text": fmt.Sprintf("Maximum iterations (%d) reached without final response", maxIterations),
+				},
+			},
+		},
+		AdditionalMessages: additionalMessages,
+	}
+
+	// Execute AfterAgent callback if configured
+	modifiedResponse := a.GetCallbackExecutor().ExecuteAfterAgent(ctx, callbackContext, finalResult.Response)
+	if modifiedResponse != nil {
+		finalResult.Response = modifiedResponse
+	}
+
+	return finalResult, fmt.Errorf("maximum iterations (%d) reached without final response", maxIterations)
 }

@@ -13,6 +13,9 @@ type ToolBox interface {
 	// GetTools returns all available tools in OpenAI function call format
 	GetTools() []sdk.ChatCompletionTool
 
+	// GetTool retrieves a tool by its name and a boolean indicating whether it found the tool
+	GetTool(toolName string) (Tool, bool)
+
 	// ExecuteTool executes a tool by name with the provided arguments
 	// Returns the tool result as a string and any error that occurred
 	ExecuteTool(ctx context.Context, toolName string, arguments map[string]any) (string, error)
@@ -81,6 +84,12 @@ func NewDefaultToolBox() *DefaultToolBox {
 // AddTool adds a tool to the toolbox
 func (tb *DefaultToolBox) AddTool(tool Tool) {
 	tb.tools[tool.GetName()] = tool
+}
+
+// GetTool retrieves a tool by its name and a boolean indicating whether it found the tool
+func (tb *DefaultToolBox) GetTool(toolName string) (Tool, bool) {
+	tool, ok := tb.tools[toolName]
+	return tool, ok
 }
 
 // GetTools returns all available tools in OpenAI function call format

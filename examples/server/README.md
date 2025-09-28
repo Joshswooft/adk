@@ -119,6 +119,23 @@ This travel planning example:
 
 **Perfect for testing with**: `examples/client/cmd/pausedtask-streaming` - Send "I need help planning a vacation" to see the full interactive planning process!
 
+### 5. Server With Guard Rails
+
+Demonstrates how you can create a server and configure guard rails that can act before/after a model is called.
+
+```bash
+# Configure the Inference Gateway
+cp .env.gateway.example .env
+
+# Edit .env to configure the Inference Gateway URL and other settings
+docker run --rm --name inference-gateway --env-file .env -p 8081:8080 ghcr.io/inference-gateway/inference-gateway:latest
+export AGENT_CLIENT_BASE_URL=http://localhost:8081/v1
+export AGENT_CLIENT_PROVIDER=deepseek # Choose your LLM provider (openai, anthropic, ollama, deepseek, google, claudflare, etc.)
+export AGENT_CLIENT_MODEL=deepseek-chat
+go run cmd/guardrails/main.go
+```
+
+
 ## Example Usage
 
 ### Test the A2A Protocol

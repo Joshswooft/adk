@@ -11,6 +11,7 @@ import (
 	"time"
 
 	client "github.com/inference-gateway/adk/client"
+	"github.com/inference-gateway/adk/types"
 	adk "github.com/inference-gateway/adk/types"
 	envconfig "github.com/sethvargo/go-envconfig"
 	zap "go.uber.org/zap"
@@ -324,7 +325,7 @@ func handleStatusUpdate(event map[string]any, state *StreamState, logger *zap.Lo
 		zap.String("state", stateStr))
 
 	switch stateStr {
-	case "input-required":
+	case string(types.TaskStateInputRequired):
 		state.TaskPaused = true
 		fmt.Printf("⏸️  [Event %d] Task paused - input required (Task: %s)\n", state.EventCount, state.CurrentTaskID)
 

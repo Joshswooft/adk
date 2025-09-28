@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	sdk "github.com/inference-gateway/sdk"
 )
 
@@ -67,6 +68,53 @@ func TestNewDefaultToolBox_GetTools(t *testing.T) {
 	if inputRequiredTool.Parameters == nil {
 		t.Error("Expected input_required tool to have parameters")
 	}
+}
+
+// helper to compare tools
+var toolComparer = func(x, y Tool) bool {
+	return x.GetName() == y.GetName() && x.GetDescription() == y.GetDescription()
+}
+
+func TestNewDefaultToolBox_GetTool(t *testing.T) {
+
+	tests := map[string]struct {
+		setupToolbox  func() ToolBox
+		toolToFind    string
+		expectedTool  Tool
+		expectedFound bool
+	}{
+		"Returns false when the tool does not exist in the toolbox": {
+			toolToFind:    "test",
+			expectedFound: false,
+			expectedTool:  nil,
+			setupToolbox: func() ToolBox {
+				return NewDefaultToolBox()
+			},
+		},
+		"Returns the tool in the toolbox with the matching tool name": {
+			toolToFind:    "test",
+			expectedTool:  NewBasicTool("test", "a test tool", nil, nil),
+			expectedFound: true,
+			setupToolbox: func() ToolBox {
+				toolbox := NewDefaultToolBox()
+				toolbox.AddTool(NewBasicTool("test", "a test tool", nil, nil))
+				return toolbox
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		gotTool, gotFound := tc.setupToolbox().GetTool(tc.toolToFind)
+		if gotFound != tc.expectedFound {
+			t.Errorf("testCase: '%s', Expected found '%t' not equal to got found: '%t'", name, tc.expectedFound, gotFound)
+			return
+		}
+
+		if diff := cmp.Diff(gotTool, tc.expectedTool, cmp.Comparer(toolComparer)); diff != "" {
+			t.Errorf("testCase: '%s': GetTool() mismatch (-want +got):\n%s", name, diff)
+		}
+	}
+
 }
 
 func TestNewToolBox_CreatesEmptyToolBox(t *testing.T) {

@@ -30,6 +30,20 @@ type AgentBuilder interface {
 	WithMaxChatCompletion(max int) AgentBuilder
 	// WithMaxConversationHistory sets the maximum conversation history for the agent
 	WithMaxConversationHistory(max int) AgentBuilder
+	// WithCallbacks sets callback functions for the agent
+	WithCallbacks(callbacks *CallbackConfig) AgentBuilder
+	// WithBeforeAgentCallback sets one or more before agent callbacks (replaces existing)
+	WithBeforeAgentCallback(callbacks ...BeforeAgentCallback) AgentBuilder
+	// WithAfterAgentCallback sets one or more after agent callbacks (replaces existing)
+	WithAfterAgentCallback(callbacks ...AfterAgentCallback) AgentBuilder
+	// WithBeforeModelCallback sets one or more before model callbacks (replaces existing)
+	WithBeforeModelCallback(callbacks ...BeforeModelCallback) AgentBuilder
+	// WithAfterModelCallback sets one or more after model callbacks (replaces existing)
+	WithAfterModelCallback(callbacks ...AfterModelCallback) AgentBuilder
+	// WithBeforeToolCallback sets one or more before tool callbacks (replaces existing)
+	WithBeforeToolCallback(callbacks ...BeforeToolCallback) AgentBuilder
+	// WithAfterToolCallback sets one or more after tool callbacks (replaces existing)
+	WithAfterToolCallback(callbacks ...AfterToolCallback) AgentBuilder
 	// GetConfig returns the current agent configuration (for testing purposes)
 	GetConfig() *config.AgentConfig
 	// Build creates and returns the configured agent
@@ -45,7 +59,8 @@ type AgentBuilderImpl struct {
 	config       *config.AgentConfig
 	llmClient    LLMClient
 	toolBox      ToolBox
-	systemPrompt *string // Use pointer to distinguish between not set and empty string
+	systemPrompt *string         // Use pointer to distinguish between not set and empty string
+	callbacks    *CallbackConfig // Callback configuration for the agent
 }
 
 // NewAgentBuilder creates a new agent builder with required dependencies.
@@ -129,6 +144,66 @@ func (b *AgentBuilderImpl) WithMaxConversationHistory(max int) AgentBuilder {
 	return b
 }
 
+// WithCallbacks sets callback functions for the agent
+func (b *AgentBuilderImpl) WithCallbacks(callbacks *CallbackConfig) AgentBuilder {
+	b.callbacks = callbacks
+	return b
+}
+
+// WithBeforeAgentCallback sets one or more before agent callbacks (replaces existing)
+func (b *AgentBuilderImpl) WithBeforeAgentCallback(callbacks ...BeforeAgentCallback) AgentBuilder {
+	if b.callbacks == nil {
+		b.callbacks = &CallbackConfig{}
+	}
+	b.callbacks.BeforeAgent = callbacks
+	return b
+}
+
+// WithAfterAgentCallback sets one or more after agent callbacks (replaces existing)
+func (b *AgentBuilderImpl) WithAfterAgentCallback(callbacks ...AfterAgentCallback) AgentBuilder {
+	if b.callbacks == nil {
+		b.callbacks = &CallbackConfig{}
+	}
+	b.callbacks.AfterAgent = callbacks
+	return b
+}
+
+// WithBeforeModelCallback sets one or more before model callbacks (replaces existing)
+func (b *AgentBuilderImpl) WithBeforeModelCallback(callbacks ...BeforeModelCallback) AgentBuilder {
+	if b.callbacks == nil {
+		b.callbacks = &CallbackConfig{}
+	}
+	b.callbacks.BeforeModel = callbacks
+	return b
+}
+
+// WithAfterModelCallback sets one or more after model callbacks (replaces existing)
+func (b *AgentBuilderImpl) WithAfterModelCallback(callbacks ...AfterModelCallback) AgentBuilder {
+	if b.callbacks == nil {
+		b.callbacks = &CallbackConfig{}
+	}
+	b.callbacks.AfterModel = callbacks
+	return b
+}
+
+// WithBeforeToolCallback sets one or more before tool callbacks (replaces existing)
+func (b *AgentBuilderImpl) WithBeforeToolCallback(callbacks ...BeforeToolCallback) AgentBuilder {
+	if b.callbacks == nil {
+		b.callbacks = &CallbackConfig{}
+	}
+	b.callbacks.BeforeTool = callbacks
+	return b
+}
+
+// WithAfterToolCallback sets one or more after tool callbacks (replaces existing)
+func (b *AgentBuilderImpl) WithAfterToolCallback(callbacks ...AfterToolCallback) AgentBuilder {
+	if b.callbacks == nil {
+		b.callbacks = &CallbackConfig{}
+	}
+	b.callbacks.AfterTool = callbacks
+	return b
+}
+
 // GetConfig returns the current agent configuration (for testing purposes)
 func (b *AgentBuilderImpl) GetConfig() *config.AgentConfig {
 	return b.config
@@ -158,6 +233,12 @@ func (b *AgentBuilderImpl) Build() (*OpenAICompatibleAgentImpl, error) {
 
 	if b.toolBox != nil {
 		agent.SetToolBox(b.toolBox)
+	}
+
+	// Set up callback executor if callbacks are configured
+	if b.callbacks != nil {
+		callbackExecutor := NewCallbackExecutor(b.callbacks, b.logger)
+		agent.SetCallbackExecutor(callbackExecutor)
 	}
 
 	return agent, nil

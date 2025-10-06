@@ -47,27 +47,24 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 
 	// Create callback context for this streaming invocation
 	var callbackContext *CallbackContext
-	if a.callbackExecutor != nil {
-		callbackContext = &CallbackContext{
-			AgentName:    "agent", // TODO: Get actual agent name from context
-			InvocationID: fmt.Sprintf("streaming-invocation-%d", time.Now().UnixNano()),
-			Logger:       a.logger,
-		}
-		// Execute BeforeAgent callback if configured
-		skipResult := a.callbackExecutor.ExecuteBeforeAgent(ctx, callbackContext)
-		if skipResult != nil {
-			// Callback returned a message, skip streaming execution
-			go func() {
-				defer close(outputChan)
-				// Send the skip result as a completion event
-				completionEvent := types.NewMessageEvent("adk.agent.stream.completed", skipResult.MessageID, skipResult, nil)
-				select {
-				case outputChan <- completionEvent:
-				case <-ctx.Done():
-				}
-			}()
-			return outputChan, nil
-		}
+	callbackContext = &CallbackContext{
+		AgentName:    "agent", // TODO: Get actual agent name from context
+		InvocationID: fmt.Sprintf("streaming-invocation-%d", time.Now().UnixNano()),
+		Logger:       a.logger,
+	}
+	skipResult := a.GetCallbackExecutor().ExecuteBeforeAgent(ctx, callbackContext)
+	if skipResult != nil {
+		// Callback returned a message, skip streaming execution
+		go func() {
+			defer close(outputChan)
+			// Send the skip result as a completion event
+			completionEvent := types.NewMessageEvent("adk.agent.stream.completed", skipResult.MessageID, skipResult, nil)
+			select {
+			case outputChan <- completionEvent:
+			case <-ctx.Done():
+			}
+		}()
+		return outputChan, nil
 	}
 
 	go func() {
@@ -98,25 +95,23 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 			// Execute BeforeModel callback if configured
 			var streamSkipped bool
 			var preGeneratedResponse *types.Message
-			if a.callbackExecutor != nil && callbackContext != nil {
-				// Convert conversation to LLM request format for callback
-				a2aMessages := make([]types.Message, len(currentMessages))
-				copy(a2aMessages, currentMessages)
+			// Convert conversation to LLM request format for callback
+			a2aMessages := make([]types.Message, len(currentMessages))
+			copy(a2aMessages, currentMessages)
 
-				llmRequest := &LLMRequest{
-					Contents: a2aMessages,
-					Config:   &LLMConfig{
-						// TODO: Add system instruction from config
-					},
-				}
+			llmRequest := &LLMRequest{
+				Contents: a2aMessages,
+				Config:   &LLMConfig{
+					// TODO: Add system instruction from config
+				},
+			}
 
-				llmResponse := a.callbackExecutor.ExecuteBeforeModel(ctx, callbackContext, llmRequest)
-				if llmResponse != nil {
-					// Callback returned a response, use it instead of calling LLM
-					streamSkipped = true
-					preGeneratedResponse = llmResponse.Content
-					a.logger.Debug("BeforeModel callback provided response, skipping LLM streaming call", zap.Int("iteration", iteration))
-				}
+			llmResponse := a.GetCallbackExecutor().ExecuteBeforeModel(ctx, callbackContext, llmRequest)
+			if llmResponse != nil {
+				// Callback returned a response, use it instead of calling LLM
+				streamSkipped = true
+				preGeneratedResponse = llmResponse.Content
+				a.logger.Debug("BeforeModel callback provided response, skipping LLM streaming call", zap.Int("iteration", iteration))
 			}
 
 			var streamResponseChan <-chan *sdk.CreateChatCompletionStreamResponse
@@ -283,12 +278,11 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 				}
 			} // End of normal streaming execution
 
-			// Execute AfterModel callback if configured and we have an assistant message
-			if a.callbackExecutor != nil && callbackContext != nil && assistantMessage != nil {
+			if assistantMessage != nil {
 				originalResponse := &LLMResponse{
 					Content: assistantMessage,
 				}
-				modifiedResponse := a.callbackExecutor.ExecuteAfterModel(ctx, callbackContext, originalResponse)
+				modifiedResponse := a.GetCallbackExecutor().ExecuteAfterModel(ctx, callbackContext, originalResponse)
 				if modifiedResponse != nil {
 					// Use modified response
 					assistantMessage = modifiedResponse.Content
@@ -346,6 +340,23 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 					}
 				}
 
+				if len(toolResultMessages) > 0 {
+					currentMessages = append(currentMessages, toolResultMessages...)
+					a.logger.Debug("persisted tool result messages",
+						zap.Int("iteration", iteration),
+						zap.Int("tool_result_count", len(toolResultMessages)))
+				}
+
+				if len(toolResultMessages) > 0 {
+					lastToolMessage := toolResultMessages[len(toolResultMessages)-1]
+					if lastToolMessage.Kind == "input_required" {
+						a.logger.Debug("streaming completed - input required from user",
+							zap.Int("iteration", iteration),
+							zap.Int("final_message_count", len(currentMessages)))
+						return
+					}
+				}
+
 			} else {
 				currentMessages = append(currentMessages, *assistantMessage)
 				iterationEvent := types.NewIterationCompletedEvent(iteration, "streaming-task", assistantMessage)
@@ -357,40 +368,17 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 
 			}
 
-			// FIXME: where does this go?
-			// streaming = false
-
-			// FIXME section
-			if len(toolResultMessages) > 0 {
-				currentMessages = append(currentMessages, toolResultMessages...)
-				a.logger.Debug("persisted tool result messages",
-					zap.Int("iteration", iteration),
-					zap.Int("tool_result_count", len(toolResultMessages)))
-			}
-
-			if len(toolResultMessages) > 0 {
-				lastToolMessage := toolResultMessages[len(toolResultMessages)-1]
-				if lastToolMessage.Kind == "input_required" {
-					a.logger.Debug("streaming completed - input required from user",
-						zap.Int("iteration", iteration),
-						zap.Int("final_message_count", len(currentMessages)))
-					return
-				}
-			}
-
 			if assistantMessage != nil && len(toolResultMessages) == 0 {
 				// Execute AfterAgent callback if configured before completion
-				if a.callbackExecutor != nil && callbackContext != nil {
-					modifiedResponse := a.callbackExecutor.ExecuteAfterAgent(ctx, callbackContext, assistantMessage)
-					if modifiedResponse != nil {
-						assistantMessage = modifiedResponse
-						a.logger.Debug("AfterAgent callback modified final streaming response", zap.Int("iteration", iteration))
-						// Send the modified response as a final event
-						finalEvent := types.NewMessageEvent("adk.agent.stream.modified", assistantMessage.MessageID, assistantMessage, nil)
-						select {
-						case outputChan <- finalEvent:
-						case <-ctx.Done():
-						}
+				modifiedResponse := a.GetCallbackExecutor().ExecuteAfterAgent(ctx, callbackContext, assistantMessage)
+				if modifiedResponse != nil {
+					assistantMessage = modifiedResponse
+					a.logger.Debug("AfterAgent callback modified final streaming response", zap.Int("iteration", iteration))
+					// Send the modified response as a final event
+					finalEvent := types.NewMessageEvent("adk.agent.stream.modified", assistantMessage.MessageID, assistantMessage, nil)
+					select {
+					case outputChan <- finalEvent:
+					case <-ctx.Done():
 					}
 				}
 
@@ -407,223 +395,12 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 				zap.Int("tool_results_count", len(toolResultMessages)),
 				zap.Int("unique_tool_calls", len(toolResults)))
 
-			// FIXME: end section
-
 		}
 
 		a.logger.Warn("max streaming iterations reached", zap.Int("max_iterations", a.config.MaxChatCompletionIterations))
 	}()
 
 	return outputChan, nil
-}
-
-// TODO: refactor me
-// executeToolCallsWithEvents executes tool calls and emits events, returning tool result messages
-// Now supports callbacks for tool execution
-func (a *OpenAICompatibleAgentImpl) executeToolCallsWithEvents(ctx context.Context, toolCalls []sdk.ChatCompletionMessageToolCall, outputChan chan<- cloudevents.Event) []types.Message {
-	// Create callback context for tool execution
-	var callbackContext *CallbackContext
-	if a.callbackExecutor != nil {
-		callbackContext = &CallbackContext{
-			AgentName:    "agent", // TODO: Get actual agent name from context
-			InvocationID: fmt.Sprintf("tool-invocation-%d", time.Now().UnixNano()),
-			Logger:       a.logger,
-		}
-	}
-	toolResultMessages := make([]types.Message, 0)
-
-	for _, toolCall := range toolCalls {
-		if toolCall.Function.Name == "" {
-			continue
-		}
-
-		startEvent := types.NewStreamingStatusMessage(
-			fmt.Sprintf("tool-start-%s", toolCall.Id),
-			types.TaskStateWorking,
-			// "started", // started is not a valid task state according to spec
-			map[string]any{
-				"tool_name": toolCall.Function.Name,
-			},
-		)
-
-		select {
-		case outputChan <- types.NewMessageEvent("adk.agent.tool.started", startEvent.MessageID, startEvent, nil):
-		case <-ctx.Done():
-			return toolResultMessages
-		}
-
-		var args map[string]any
-		var result string
-		var toolErr error
-
-		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
-			a.logger.Error("failed to parse tool arguments", zap.String("tool", toolCall.Function.Name), zap.Error(err))
-			result = fmt.Sprintf("Error parsing tool arguments: %s", err.Error())
-			toolErr = err
-
-			failedEvent := types.NewStreamingStatusMessage(
-				fmt.Sprintf("tool-failed-%s", toolCall.Id),
-				types.TaskStateFailed,
-				map[string]any{
-					"tool_name": toolCall.Function.Name,
-				},
-			)
-
-			select {
-			case outputChan <- types.NewMessageEvent("adk.agent.tool.failed", failedEvent.MessageID, failedEvent, nil):
-			case <-ctx.Done():
-			}
-		} else {
-			// Execute BeforeTool callback if configured
-			var toolResult map[string]interface{}
-			var tool Tool
-			if a.callbackExecutor != nil && callbackContext != nil {
-
-				toolContext := &ToolContext{
-					AgentName:    callbackContext.AgentName,
-					InvocationID: callbackContext.InvocationID,
-					Logger:       callbackContext.Logger,
-				}
-
-				tool, toolFound := a.toolBox.GetTool(toolCall.Function.Name)
-				if !toolFound {
-					a.logger.Error("failed to find tool", zap.String("tool", toolCall.Function.Name), zap.Error(toolErr))
-				}
-				toolResult = a.callbackExecutor.ExecuteBeforeTool(ctx, tool, args, toolContext)
-			}
-
-			if toolResult != nil {
-				// Callback returned a result, use it instead of executing tool
-				resultBytes, err := json.Marshal(toolResult)
-				if err != nil {
-					result = fmt.Sprintf("Error marshaling callback result: %s", err.Error())
-				} else {
-					result = string(resultBytes)
-				}
-				a.logger.Debug("BeforeTool callback provided result, skipping tool execution", zap.String("tool", toolCall.Function.Name))
-			} else if toolCall.Function.Name == "input_required" {
-				a.logger.Debug("input_required tool called in streaming mode",
-					zap.String("tool_call_id", toolCall.Id),
-					zap.String("message", toolCall.Function.Arguments))
-
-				result, toolErr = a.toolBox.ExecuteTool(ctx, toolCall.Function.Name, args)
-
-				completedEvent := types.NewStreamingStatusMessage(
-					fmt.Sprintf("tool-completed-%s", toolCall.Id),
-					types.TaskStateCompleted,
-					map[string]any{
-						"tool_name": toolCall.Function.Name,
-					},
-				)
-
-				select {
-				case outputChan <- types.NewMessageEvent("adk.agent.tool.completed", completedEvent.MessageID, completedEvent, nil):
-				case <-ctx.Done():
-					return toolResultMessages
-				}
-
-				toolResultMessage := types.NewToolResultMessage(toolCall.Id, toolCall.Function.Name, result, toolErr != nil)
-
-				select {
-				case outputChan <- types.NewMessageEvent("adk.agent.tool.result", toolResultMessage.MessageID, toolResultMessage, nil):
-				case <-ctx.Done():
-					return toolResultMessages
-				}
-
-				toolResultMessages = append(toolResultMessages, *toolResultMessage)
-
-				inputMessage := args["message"].(string)
-				inputRequiredMessage := types.NewInputRequiredMessage(toolCall.Id, inputMessage)
-
-				select {
-				case outputChan <- types.NewMessageEvent("adk.agent.input.required", inputRequiredMessage.MessageID, inputRequiredMessage, nil):
-				case <-ctx.Done():
-				}
-
-				toolResultMessages = append(toolResultMessages, *inputRequiredMessage)
-
-				return toolResultMessages
-			} else {
-				// Normal tool execution
-				result, toolErr = a.toolBox.ExecuteTool(ctx, toolCall.Function.Name, args)
-			}
-
-			// Execute AfterTool callback if configured and tool was executed (not from callback)
-			if a.callbackExecutor != nil && callbackContext != nil && toolResult == nil {
-				toolContext := &ToolContext{
-					AgentName:    callbackContext.AgentName,
-					InvocationID: callbackContext.InvocationID,
-					Logger:       callbackContext.Logger,
-				}
-
-				// Convert result to map for callback
-				originalResult := map[string]interface{}{"result": result}
-				if toolErr != nil {
-					originalResult["error"] = toolErr.Error()
-				}
-
-				modifiedResult := a.callbackExecutor.ExecuteAfterTool(ctx, tool, args, toolContext, originalResult)
-				if modifiedResult != nil {
-					// Use modified result
-					resultBytes, err := json.Marshal(modifiedResult)
-					if err != nil {
-						result = fmt.Sprintf("Error marshaling modified result: %s", err.Error())
-					} else {
-						result = string(resultBytes)
-						// Clear toolErr if the callback fixed it
-						if _, hasError := modifiedResult["error"]; !hasError {
-							toolErr = nil
-						}
-					}
-					a.logger.Debug("AfterTool callback modified result", zap.String("tool", toolCall.Function.Name))
-				}
-			}
-
-			if toolErr != nil {
-				a.logger.Error("failed to execute tool", zap.String("tool", toolCall.Function.Name), zap.Error(toolErr))
-				result = fmt.Sprintf("Tool execution failed: %s", toolErr.Error())
-
-				failedEvent := types.NewStreamingStatusMessage(
-					fmt.Sprintf("tool-failed-%s", toolCall.Id),
-					types.TaskStateFailed,
-					map[string]any{
-						"tool_name": toolCall.Function.Name,
-					},
-				)
-
-				select {
-				case outputChan <- types.NewMessageEvent("adk.agent.tool.failed", failedEvent.MessageID, failedEvent, nil):
-				case <-ctx.Done():
-				}
-			} else {
-				completedEvent := types.NewStreamingStatusMessage(
-					fmt.Sprintf("tool-completed-%s", toolCall.Id),
-					types.TaskStateCompleted,
-					map[string]any{
-						"tool_name": toolCall.Function.Name,
-					},
-				)
-
-				select {
-				case outputChan <- types.NewMessageEvent("adk.agent.tool.completed", completedEvent.MessageID, completedEvent, nil):
-				case <-ctx.Done():
-					return toolResultMessages
-				}
-			}
-		}
-
-		toolResultMessage := types.NewToolResultMessage(toolCall.Id, toolCall.Function.Name, result, toolErr != nil)
-
-		select {
-		case outputChan <- types.NewMessageEvent("adk.agent.tool.result", toolResultMessage.MessageID, toolResultMessage, nil):
-		case <-ctx.Done():
-			return toolResultMessages
-		}
-
-		toolResultMessages = append(toolResultMessages, *toolResultMessage)
-	}
-
-	return toolResultMessages
 }
 
 // executeTools handles tool execution, including callbacks and special-cases.
@@ -637,7 +414,7 @@ func (a *OpenAICompatibleAgentImpl) executeTools(
 
 	return pipeline.New(
 		a.emitToolStartedStage(),
-		a.executeToolStage(callbackContext, a.callbackExecutor),
+		a.executeToolStage(callbackContext),
 		a.emitToolCompletedStage(),
 	).Run(ctx, toolCalls)
 }
@@ -659,7 +436,7 @@ func (a *OpenAICompatibleAgentImpl) emitToolStartedStage() pipeline.Stage {
 }
 
 // executeToolStage - executes the tool and any before/after tool hooks
-func (a *OpenAICompatibleAgentImpl) executeToolStage(callbackContext *CallbackContext, callbackExecutor CallbackExecutor) pipeline.Stage {
+func (a *OpenAICompatibleAgentImpl) executeToolStage(callbackContext *CallbackContext) pipeline.Stage {
 	return func(ctx context.Context, call sdk.ChatCompletionMessageToolCall) ([]types.Message, error) {
 		var messages []types.Message
 
@@ -693,7 +470,7 @@ func (a *OpenAICompatibleAgentImpl) executeToolStage(callbackContext *CallbackCo
 		}
 
 		// 1. Execute before tool hooks
-		res := callbackExecutor.ExecuteBeforeTool(ctx, tool, args, &toolContext)
+		res := a.GetCallbackExecutor().ExecuteBeforeTool(ctx, tool, args, &toolContext)
 		if res != nil {
 			// Short-circuit the tool execution
 			resultBytes, _ := json.Marshal(res)
@@ -710,7 +487,7 @@ func (a *OpenAICompatibleAgentImpl) executeToolStage(callbackContext *CallbackCo
 		}
 
 		// 3. Execute after tool hooks
-		modifiedResult := a.callbackExecutor.ExecuteAfterTool(ctx, tool, args, &toolContext, originalResult)
+		modifiedResult := a.GetCallbackExecutor().ExecuteAfterTool(ctx, tool, args, &toolContext, originalResult)
 		if modifiedResult != nil {
 			// Use modified result
 			resultBytes, err := json.Marshal(modifiedResult)

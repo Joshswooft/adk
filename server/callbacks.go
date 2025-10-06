@@ -76,19 +76,6 @@ type LLMResponse struct {
 	Content *types.Message
 }
 
-// TODO: this isn't being used - need to see if modifying tool arguments is a thing?
-// ToolCall represents a tool call from the LLM
-type ToolCall struct {
-	// ID uniquely identifies this tool call
-	ID string
-
-	// Name is the name of the tool to execute
-	Name string
-
-	// Arguments contains the arguments to pass to the tool
-	Arguments map[string]interface{}
-}
-
 // Agent Lifecycle Callbacks
 
 // BeforeAgentCallback is called immediately before the agent's main execution logic starts

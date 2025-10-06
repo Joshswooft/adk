@@ -476,6 +476,7 @@ func (a *OpenAICompatibleAgentImpl) executeToolCallsWithEvents(ctx context.Conte
 		} else {
 			// Execute BeforeTool callback if configured
 			var toolResult map[string]interface{}
+			var tool Tool
 			if a.callbackExecutor != nil && callbackContext != nil {
 
 				toolContext := &ToolContext{
@@ -484,12 +485,9 @@ func (a *OpenAICompatibleAgentImpl) executeToolCallsWithEvents(ctx context.Conte
 					Logger:       callbackContext.Logger,
 				}
 
-				tool, found := a.toolBox.GetTool(toolCall.Function.Name)
-				if !found {
+				tool, toolFound := a.toolBox.GetTool(toolCall.Function.Name)
+				if !toolFound {
 					a.logger.Error("failed to find tool", zap.String("tool", toolCall.Function.Name), zap.Error(toolErr))
-					// FIXME: fix linting issue
-
-					result = fmt.Sprintf("Tool execution failed: %s", toolErr.Error())
 				}
 				toolResult = a.callbackExecutor.ExecuteBeforeTool(ctx, tool, args, toolContext)
 			}
@@ -562,12 +560,6 @@ func (a *OpenAICompatibleAgentImpl) executeToolCallsWithEvents(ctx context.Conte
 				originalResult := map[string]interface{}{"result": result}
 				if toolErr != nil {
 					originalResult["error"] = toolErr.Error()
-				}
-
-				tool, found := a.toolBox.GetTool(toolCall.Function.Name)
-				if !found {
-					a.logger.Error("failed to find tool", zap.String("tool", toolCall.Function.Name), zap.Error(toolErr))
-					result = fmt.Sprintf("Tool execution failed: %s", toolErr.Error())
 				}
 
 				modifiedResult := a.callbackExecutor.ExecuteAfterTool(ctx, tool, args, toolContext, originalResult)
@@ -688,7 +680,7 @@ func (a *OpenAICompatibleAgentImpl) executeToolStage(callbackContext *CallbackCo
 
 		tool, found := a.toolBox.GetTool(call.Function.Name)
 		if !found {
-			return nil, nil
+			return nil, &ToolNotFoundError{ToolName: call.Function.Name}
 		}
 
 		toolContext := ToolContext{

@@ -241,7 +241,7 @@ func (a *OpenAICompatibleAgentImpl) Run(ctx context.Context, messages []types.Me
 			return nil, fmt.Errorf("failed to convert assistant message to A2A format: %w", err)
 		}
 
-		if assistantMessage.ToolCalls == nil || len(*assistantMessage.ToolCalls) == 0 || a.toolBox == nil {
+		if assistantMessage.ToolCalls == nil || len(*assistantMessage.ToolCalls) == 0 || a.toolBox == nil || len(a.toolBox.GetTools()) == 0 {
 			finalResult := &AgentResponse{
 				Response:           assistantA2A,
 				AdditionalMessages: additionalMessages,
@@ -306,7 +306,7 @@ func (a *OpenAICompatibleAgentImpl) Run(ctx context.Context, messages []types.Me
 			}
 
 			// Execute BeforeTool callback if configured
-			var toolResult map[string]interface{}
+			var beforeToolResult map[string]interface{}
 
 			toolContext := &ToolContext{
 				AgentName:    callbackContext.AgentName,
@@ -314,24 +314,26 @@ func (a *OpenAICompatibleAgentImpl) Run(ctx context.Context, messages []types.Me
 				Logger:       callbackContext.Logger,
 			}
 
-			tool, found := a.toolBox.GetTool(toolCall.Function.Name)
-			if !found {
-				a.logger.Error("failed to find tool", zap.String("tool", toolCall.Function.Name), zap.Error(toolErr))
-				// FIXME: fix linting issue
-				result = fmt.Sprintf("Tool execution failed: %s", toolErr.Error())
+			tool, toolFound := a.toolBox.GetTool(toolCall.Function.Name)
+			if !toolFound {
+				a.logger.Error("failed to find tool", zap.String("tool", toolCall.Function.Name))
+				result = "Tool execution failed: tool not found"
 			}
 
-			toolResult = a.GetCallbackExecutor().ExecuteBeforeTool(ctx, tool, args, toolContext)
+			// TODO: I'm not sure if executing the before tool hook when the tool itself is not found is good idea?
+			beforeToolResult = a.GetCallbackExecutor().ExecuteBeforeTool(ctx, tool, args, toolContext)
 
-			if toolResult != nil {
+			if beforeToolResult != nil {
 				// Callback returned a result, use it instead of executing tool
-				resultBytes, err := json.Marshal(toolResult)
+				resultBytes, err := json.Marshal(beforeToolResult)
 				if err != nil {
 					result = fmt.Sprintf("Error marshaling callback result: %s", err.Error())
 				} else {
 					result = string(resultBytes)
 				}
-			} else {
+			}
+
+			if toolFound && beforeToolResult == nil {
 				// Normal tool execution
 				result, toolErr = a.toolBox.ExecuteTool(ctx, toolCall.Function.Name, args)
 				if toolErr != nil {
@@ -351,12 +353,6 @@ func (a *OpenAICompatibleAgentImpl) Run(ctx context.Context, messages []types.Me
 				originalResult := map[string]interface{}{"result": result}
 				if toolErr != nil {
 					originalResult["error"] = toolErr.Error()
-				}
-
-				tool, found := a.toolBox.GetTool(toolCall.Function.Name)
-				if !found {
-					a.logger.Error("failed to find tool", zap.String("tool", toolCall.Function.Name), zap.Error(toolErr))
-					result = fmt.Sprintf("Tool execution failed: %s", toolErr.Error())
 				}
 
 				modifiedResult := a.GetCallbackExecutor().ExecuteAfterTool(ctx, tool, args, toolContext, originalResult)

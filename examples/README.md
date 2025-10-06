@@ -136,6 +136,10 @@ Demonstrates different queue storage backends for task management and horizontal
 - Docker Compose setups for both storage backends
 - Complete server and client implementations
 
+#### `guardrails/`
+
+Demonstrates how to setup guard rails to protect AI agents from going off the beaten track by using the callback feature.
+
 #### `tls-example/`
 
 TLS-enabled A2A server demonstrating secure HTTPS communication.

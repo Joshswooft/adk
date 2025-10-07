@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/inference-gateway/adk/internal/pipeline"
+	"github.com/inference-gateway/adk/server/utils"
 	types "github.com/inference-gateway/adk/types"
 	sdk "github.com/inference-gateway/sdk"
 	zap "go.uber.org/zap"
@@ -158,6 +158,7 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 							zap.Int("tool_result_count", len(toolResultMessages)),
 							zap.Int("pending_tool_calls", len(toolCallAccumulator)))
 
+						// If we were building a partial assistant message, emit an iteration completed event for it
 						if assistantMessage != nil {
 							iterationEvent := types.NewIterationCompletedEvent(iteration, "streaming-task", assistantMessage)
 							select {
@@ -175,7 +176,6 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 							fmt.Sprintf("task-interrupted-%d", iteration),
 							// indicates an interrupt: https://a2a-protocol.org/dev/specification/#63-taskstate-enum
 							types.TaskStateInputRequired,
-							// "interrupted",
 							map[string]any{
 								"reason": "context_cancelled",
 								"task":   interruptedTask,
@@ -187,7 +187,11 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 						}
 						return
 
-					case streamErr := <-streamErrorChan:
+					case streamErr, ok := <-streamErrorChan:
+						if !ok {
+							streaming = false
+							break
+						}
 						if streamErr != nil {
 							a.logger.Error("streaming failed", zap.Error(streamErr))
 
@@ -209,16 +213,19 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 
 					case streamResp, ok := <-streamResponseChan:
 						if !ok {
+							// remote closed the stream channel: end streaming normally
 							streaming = false
-							break
+							continue // 🔁 ensure we exit the loop gracefully
 						}
 
 						if streamResp == nil || len(streamResp.Choices) == 0 {
+							// ignore empty chunk
 							continue
 						}
 
 						choice := streamResp.Choices[0]
 
+						// handle text deltas
 						if choice.Delta.Content != "" {
 							fullContent += choice.Delta.Content
 
@@ -234,6 +241,7 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 							}
 						}
 
+						// accumulate tool calls (merge chunked JSON, ids, names)
 						for _, toolCallChunk := range choice.Delta.ToolCalls {
 							key := fmt.Sprintf("%d", toolCallChunk.Index)
 
@@ -254,12 +262,13 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 							if toolCallChunk.Function.Arguments != "" {
 								if toolCall.Function.Arguments == "" {
 									toolCall.Function.Arguments = toolCallChunk.Function.Arguments
-								} else if !isCompleteJSON(toolCall.Function.Arguments) {
+								} else if !utils.IsCompleteJSON(toolCall.Function.Arguments) {
 									toolCall.Function.Arguments += toolCallChunk.Function.Arguments
 								}
 							}
 						}
 
+						// if the model finished, build the assistant message and end streaming
 						if choice.FinishReason != "" {
 							assistantMessage = types.NewAssistantMessage(
 								fmt.Sprintf("assistant-stream-%d", iteration),
@@ -276,6 +285,7 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 						}
 					}
 				}
+
 			} // End of normal streaming execution
 
 			if assistantMessage != nil {
@@ -358,14 +368,15 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 				}
 
 			} else {
-				currentMessages = append(currentMessages, *assistantMessage)
-				iterationEvent := types.NewIterationCompletedEvent(iteration, "streaming-task", assistantMessage)
-				select {
-				case outputChan <- iterationEvent:
-				case <-ctx.Done():
-					return
+				if assistantMessage != nil {
+					currentMessages = append(currentMessages, *assistantMessage)
+					iterationEvent := types.NewIterationCompletedEvent(iteration, "streaming-task", assistantMessage)
+					select {
+					case outputChan <- iterationEvent:
+					case <-ctx.Done():
+						return
+					}
 				}
-
 			}
 
 			if assistantMessage != nil && len(toolResultMessages) == 0 {
@@ -571,24 +582,4 @@ func (a *OpenAICompatibleAgentImpl) emitToolFailedStage() pipeline.Stage {
 
 		return []types.Message{*failedEvent}, nil
 	}
-}
-
-// isCompleteJSON checks if a string contains complete JSON by counting balanced braces
-func isCompleteJSON(s string) bool {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
-		return false
-	}
-
-	openCount := 0
-	for _, char := range s {
-		switch char {
-		case '{':
-			openCount++
-		case '}':
-			openCount--
-		}
-	}
-
-	return openCount == 0
 }

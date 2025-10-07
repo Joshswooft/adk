@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	types "github.com/inference-gateway/adk/types"
@@ -436,4 +437,24 @@ func (c *OptimizedMessageConverter) ValidateMessagePart(part types.Part) error {
 	}
 
 	return fmt.Errorf("unsupported message part type")
+}
+
+// IsCompleteJSON checks if a string contains complete JSON by counting balanced braces
+func IsCompleteJSON(s string) bool {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
+		return false
+	}
+
+	openCount := 0
+	for _, char := range s {
+		switch char {
+		case '{':
+			openCount++
+		case '}':
+			openCount--
+		}
+	}
+
+	return openCount == 0
 }

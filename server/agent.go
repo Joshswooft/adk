@@ -113,6 +113,11 @@ func (a *OpenAICompatibleAgentImpl) GetCallbackExecutor() CallbackExecutor {
 	return a.callbackExecutor
 }
 
+// SetConverter sets the message converter for the agent
+func (a *OpenAICompatibleAgentImpl) SetConverter(messageConverter utils.MessageConverter) {
+	a.converter = messageConverter
+}
+
 // Run processes a conversation and returns the assistant's response along with additional messages
 // TODO: add more tests which use the callbacks
 func (a *OpenAICompatibleAgentImpl) Run(ctx context.Context, messages []types.Message) (*AgentResponse, error) {

@@ -233,6 +233,16 @@ tasks:
     cmds:
       - go run github.com/maxbrunsfeld/counterfeiter/v6 -o server/mocks/fake_openai_compatible_agent.go server OpenAICompatibleAgent
 
+  generate:mock:tool:
+    desc: 'Generate mock for Tool interface'
+    sources:
+      - server/agent_toolbox.go
+    generates:
+      - server/mocks/fake_tool.go
+    cmds:
+      - go run github.com/maxbrunsfeld/counterfeiter/v6 -o server/mocks/fake_tool.go server Tool
+
+
   generate:mock:toolbox:
     desc: 'Generate mock for ToolBox interface'
     sources:
@@ -250,6 +260,16 @@ tasks:
       - server/mocks/fake_artifact_storage_provider.go
     cmds:
       - go run github.com/maxbrunsfeld/counterfeiter/v6 -o server/mocks/fake_artifact_storage_provider.go server ArtifactStorageProvider
+
+  generate:mock:message-converter:
+    desc: 'Generate mock for MessageConverter interface'
+    sources:
+      - server/utils/message_converter.go
+    generates:
+      - server/mocks/utils/fake_message_converter.go
+    cmds:
+      - go run github.com/maxbrunsfeld/counterfeiter/v6 -o server/mocks/utils/fake_message_converter.go server/utils MessageConverter
+
 
   precommit:install:
     desc: 'Install the pre-commit hook'

@@ -1104,3 +1104,88 @@ func TestRunWithStream_ContextCancelled(t *testing.T) {
 		}(),
 	)
 }
+
+func TestRunWithStream_ExecutesTools(t *testing.T) {
+	ctx := context.Background()
+
+	fakeLLM := &mocks.FakeLLMClient{}
+	fakeConverter := &utils.FakeMessageConverter{}
+	fakeToolBox := &mocks.FakeToolBox{}
+
+	respChan := make(chan *sdk.CreateChatCompletionStreamResponse, 1)
+	errChan := make(chan error, 1)
+
+	// Simulate LLM returning a tool call
+	respChan <- &sdk.CreateChatCompletionStreamResponse{
+		Choices: []sdk.ChatCompletionStreamChoice{
+			{
+				Delta: sdk.ChatCompletionStreamResponseDelta{
+					ToolCalls: []sdk.ChatCompletionMessageToolCallChunk{
+						{
+							Index: 0,
+							Function: struct {
+								Name      string "json:\"name,omitempty\""
+								Arguments string "json:\"arguments,omitempty\""
+							}{
+								Name:      "echo",
+								Arguments: `{"text":"hello"}`,
+							},
+						},
+					},
+					Content: "",
+				},
+			},
+		},
+	}
+	close(respChan)
+	close(errChan)
+
+	fakeLLM.CreateStreamingChatCompletionStub = func(ctx context.Context, msgs []sdk.Message, tools ...sdk.ChatCompletionTool) (<-chan *sdk.CreateChatCompletionStreamResponse, <-chan error) {
+		return respChan, errChan
+	}
+
+	fakeConverter.ConvertToSDKReturns([]sdk.Message{{Role: sdk.User, Content: "hi"}}, nil)
+
+	fakeToolBox.GetToolsReturns([]sdk.ChatCompletionTool{
+		{
+			Function: sdk.FunctionObject{
+				Name: "echo",
+			},
+		},
+	})
+
+	logger := zaptest.NewLogger(t)
+	agentCfg := config.AgentConfig{MaxChatCompletionIterations: 1}
+
+	builder := server.NewAgentBuilder(logger)
+	agent, err := builder.WithToolBox(fakeToolBox).
+		WithConfig(&agentCfg).
+		WithLLMClient(fakeLLM).
+		Build()
+	require.NoError(t, err)
+	agent.SetConverter(fakeConverter)
+
+	out, err := agent.RunWithStream(ctx, []types.Message{{Role: "user"}})
+	require.NoError(t, err)
+
+	receivedToolResult := false
+	for ev := range out {
+		if ev.Type() == "adk.agent.iteration.completed" {
+			var msg types.Message
+			if err := ev.DataAs(&msg); err != nil {
+				continue
+			}
+			for _, part := range msg.Parts {
+				if partMap, ok := part.(map[string]any); ok {
+					if dataMap, exists := partMap["data"].(map[string]any); exists {
+						if _, hasToolResult := dataMap["tool_calls"]; hasToolResult {
+							receivedToolResult = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	assert.True(t, receivedToolResult, "expected tool results to be executed and returned")
+}

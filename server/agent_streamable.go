@@ -314,22 +314,23 @@ func (a *OpenAICompatibleAgentImpl) RunWithStream(ctx context.Context, messages 
 					toolCalls = append(toolCalls, *toolCall)
 				}
 
-				assistantMessage.Parts = append(assistantMessage.Parts, map[string]any{
-					"kind": "data",
-					"data": map[string]any{
-						"tool_calls": toolCalls,
-					},
-				})
+				if assistantMessage != nil {
+					assistantMessage.Parts = append(assistantMessage.Parts, map[string]any{
+						"kind": "data",
+						"data": map[string]any{
+							"tool_calls": toolCalls,
+						},
+					})
 
-				currentMessages = append(currentMessages, *assistantMessage)
-				iterationEvent := types.NewIterationCompletedEvent(iteration, "streaming-task", assistantMessage)
-				select {
-				case outputChan <- iterationEvent:
-				case <-ctx.Done():
-					return
+					currentMessages = append(currentMessages, *assistantMessage)
+					iterationEvent := types.NewIterationCompletedEvent(iteration, "streaming-task", assistantMessage)
+					select {
+					case outputChan <- iterationEvent:
+					case <-ctx.Done():
+						return
+					}
 				}
 
-				// toolResultMessages = a.executeToolCallsWithEvents(ctx, toolCalls, outputChan)
 				callbackContext = &CallbackContext{
 					AgentName:    "agent", // TODO: Get actual agent name from context
 					InvocationID: fmt.Sprintf("streaming-invocation-%d", time.Now().UnixNano()),
